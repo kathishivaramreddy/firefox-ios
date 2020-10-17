@@ -336,6 +336,9 @@
                   Identifier = "CopiedLinksTests">
                </Test>
                <Test
+                  Identifier = "CronTabsPerformanceTest">
+               </Test>
+               <Test
                   Identifier = "DataManagementTests/testWebSiteDataOptions()">
                </Test>
                <Test
@@ -661,6 +664,9 @@
                </Test>
                <Test
                   Identifier = "SearchTests/testPromptPresence()">
+               </Test>
+               <Test
+                  Identifier = "SearchTests/testSearchIconOnAboutHome()">
                </Test>
                <Test
                   Identifier = "SearchTests/testSearchWithFirefoxOption()">

@@ -15,7 +15,7 @@ import MobileCoreServices
 import SDWebImage
 import SwiftyJSON
 import Telemetry
-import Glean
+import MozillaAppServices
 import Sentry
 
 private let KVOs: [KVOConstants] = [
@@ -61,6 +61,7 @@ class BrowserViewController: UIViewController {
     let alertStackView = UIStackView() // All content that appears above the footer should be added to this view. (Find In Page/SnackBars)
     var findInPageBar: FindInPageBar?
     private var onboardingUserResearch: OnboardingUserResearch?
+    private var newTabUserResearch: NewTabUserResearch?
     lazy var mailtoLinkHandler = MailtoLinkHandler()
 
     fileprivate var customSearchBarButton: UIBarButtonItem?
@@ -119,6 +120,8 @@ class BrowserViewController: UIViewController {
     weak var pendingDownloadWebView: WKWebView?
 
     let downloadQueue = DownloadQueue()
+    var isCmdClickForNewTab = false
+
 
     init(profile: Profile, tabManager: TabManager) {
         self.profile = profile
@@ -288,7 +291,6 @@ class BrowserViewController: UIViewController {
             updateURLBarDisplayURL(tab)
             navigationToolbar.updateBackStatus(webView.canGoBack)
             navigationToolbar.updateForwardStatus(webView.canGoForward)
-            navigationToolbar.updateReloadStatus(tab.loading)
         }
 
         libraryDrawerViewController?.view.snp.remakeConstraints(constraintsForLibraryDrawerView)
@@ -399,7 +401,7 @@ class BrowserViewController: UIViewController {
         view.addSubview(topTouchArea)
 
         // Setup the URL bar, wrapped in a view to get transparency effect
-        urlBar = URLBarView()
+        urlBar = URLBarView(profile: profile)
         urlBar.translatesAutoresizingMaskIntoConstraints = false
         urlBar.delegate = self
         urlBar.tabToolbarDelegate = self
@@ -469,6 +471,10 @@ class BrowserViewController: UIViewController {
         
         // Setup onboarding user research for A/B testing
         onboardingUserResearch = OnboardingUserResearch()
+        // Setup New Tab user research for A/B testing
+        newTabUserResearch = NewTabUserResearch()
+        newTabUserResearch?.lpVariableObserver()
+        urlBar.newTabUserResearch = newTabUserResearch
     }
 
     fileprivate func setupConstraints() {
@@ -742,7 +748,7 @@ class BrowserViewController: UIViewController {
             }
         })
         view.setNeedsUpdateConstraints()
-        navigationToolbar.updateIsSearchStatus(true)
+        urlBar.locationView.reloadButton.reloadButtonState = .disabled
     }
 
     fileprivate func hideFirefoxHome() {
@@ -751,7 +757,6 @@ class BrowserViewController: UIViewController {
         }
 
         self.firefoxHomeViewController = nil
-        navigationToolbar.updateIsSearchStatus(false)
         UIView.animate(withDuration: 0.2, delay: 0, options: .beginFromCurrentState, animations: { () -> Void in
             firefoxHomeViewController.view.alpha = 0
         }, completion: { _ in
@@ -773,12 +778,14 @@ class BrowserViewController: UIViewController {
         if !urlBar.inOverlayMode {
             guard let url = url else {
                 hideFirefoxHome()
+                urlBar.locationView.reloadButton.reloadButtonState = .disabled
                 return
             }
             if isAboutHomeURL {
                 showFirefoxHome(inline: true)
             } else if !url.absoluteString.hasPrefix("\(InternalURL.baseUrl)/\(SessionRestoreHandler.path)") {
                 hideFirefoxHome()
+                urlBar.locationView.reloadButton.reloadButtonState = .disabled
             }
         } else if isAboutHomeURL {
             showFirefoxHome(inline: false)
@@ -893,6 +900,25 @@ class BrowserViewController: UIViewController {
         }
         return false
     }
+    
+    func setupMiddleButtonStatus(isLoading: Bool) {
+        let shouldShowNewTabButton = profile.prefs.boolForKey(PrefsKeys.ShowNewTabToolbarButton) ?? (newTabUserResearch?.newTabState ?? false)
+        
+        // No tab
+        guard let tab = tabManager.selectedTab else {
+            navigationToolbar.updateMiddleButtonState(.search)
+            return
+        }
+        
+        // Tab with starting page
+        if tab.isURLStartingPage {
+            navigationToolbar.updateMiddleButtonState(.search)
+            return
+        }
+        
+        let state: MiddleButtonState = shouldShowNewTabButton ? .newTab : (isLoading ? .stop : .reload)
+        navigationToolbar.updateMiddleButtonState(state)
+    }
 
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
         guard let webView = object as? WKWebView, let tab = tabManager[webView] else {
@@ -914,16 +940,21 @@ class BrowserViewController: UIViewController {
             guard tab === tabManager.selectedTab else { break }
             if let url = webView.url, !InternalURL.isValid(url: url) {
                 urlBar.updateProgressBar(Float(webView.estimatedProgress))
+                setupMiddleButtonStatus(isLoading: true)
             } else {
                 urlBar.hideProgressBar()
+                setupMiddleButtonStatus(isLoading: false)
             }
         case .loading:
             guard let loading = change?[.newKey] as? Bool else { break }
-
-            if tab === tabManager.selectedTab {
-                navigationToolbar.updateReloadStatus(loading)
-            }
+            setupMiddleButtonStatus(isLoading: loading)
         case .URL:
+            // Special case for "about:blank" popups, if the webView.url is nil, keep the tab url as "about:blank"
+            if tab.url?.absoluteString == "about:blank" && webView.url == nil {
+                print(webView.url?.origin)
+                break
+            }
+
             // To prevent spoofing, only change the URL immediately if the new URL is on
             // the same origin as the current URL. Otherwise, do nothing and wait for
             // didCommitNavigation to confirm the page load.
@@ -935,7 +966,7 @@ class BrowserViewController: UIViewController {
                 }
                 // Catch history pushState navigation, but ONLY for same origin navigation,
                 // for reasons above about URL spoofing risk.
-                navigateInTab(tab: tab)
+                navigateInTab(tab: tab, webViewStatus: .url)
             }
         case .title:
             // Ensure that the tab title *actually* changed to prevent repeated calls
@@ -943,7 +974,7 @@ class BrowserViewController: UIViewController {
             guard let title = tab.title else { break }
             if !title.isEmpty && title != tab.lastTitle {
                 tab.lastTitle = title
-                navigateInTab(tab: tab)
+                navigateInTab(tab: tab, webViewStatus: .title)
             }
         case .canGoBack:
             guard tab === tabManager.selectedTab, let canGoBack = change?[.newKey] as? Bool else {
@@ -1114,7 +1145,14 @@ class BrowserViewController: UIViewController {
         notificationCenter.post(name: .OnLocationChange, object: self, userInfo: info)
     }
 
-    func navigateInTab(tab: Tab, to navigation: WKNavigation? = nil) {
+    /// Enum to represent the WebView observation or delegate that triggered calling `navigateInTab`
+    enum WebViewUpdateStatus {
+        case title
+        case url
+        case finishedNavigation
+    }
+    
+    func navigateInTab(tab: Tab, to navigation: WKNavigation? = nil, webViewStatus: WebViewUpdateStatus) {
         tabManager.expireSnackbars()
 
         guard let webView = tab.webView else {
@@ -1130,28 +1168,32 @@ class BrowserViewController: UIViewController {
             if (!InternalURL.isValid(url: url) || url.isReaderModeURL), !url.isFileURL {
                 postLocationChangeNotificationForTab(tab, navigation: navigation)
 
-                webView.evaluateJavaScript("\(ReaderModeNamespace).checkReadability()", completionHandler: nil)
-            }
-
-            if urlBar.inOverlayMode, InternalURL.isValid(url: url), url.path.starts(with: "/\(AboutHomeHandler.path)") {
-                urlBar.leaveOverlayMode()
+                webView.evaluateJavascriptInDefaultContentWorld("\(ReaderModeNamespace).checkReadability()")
             }
 
             TabEvent.post(.didChangeURL(url), for: tab)
         }
-
-        if tab !== tabManager.selectedTab, let webView = tab.webView {
-            // To Screenshot a tab that is hidden we must add the webView,
-            // then wait enough time for the webview to render.
-            view.insertSubview(webView, at: 0)
-            // This is kind of a hacky fix for Bug 1476637 to prevent webpages from focusing the
-            // touch-screen keyboard from the background even though they shouldn't be able to.
-            webView.resignFirstResponder()
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500)) {
-                self.screenshotHelper.takeScreenshot(tab)
-                if webView.superview == self.view {
-                    webView.removeFromSuperview()
+        
+        // Represents WebView observation or delegate update that called this function
+        switch webViewStatus {
+        case .title, .url, .finishedNavigation:
+            if tab !== tabManager.selectedTab, let webView = tab.webView {
+                // To Screenshot a tab that is hidden we must add the webView,
+                // then wait enough time for the webview to render.
+                view.insertSubview(webView, at: 0)
+                // This is kind of a hacky fix for Bug 1476637 to prevent webpages from focusing the
+                // touch-screen keyboard from the background even though they shouldn't be able to.
+                webView.resignFirstResponder()
+                
+                // We need a better way of identifying when webviews are finished rendering
+                // There are cases in which the page will still show a loading animation or nothing when the screenshot is being taken,
+                // depending on internet connection
+                // Issue created: https://github.com/mozilla-mobile/firefox-ios/issues/7003
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1000)) {
+                    self.screenshotHelper.takeScreenshot(tab)
+                    if webView.superview == self.view {
+                        webView.removeFromSuperview()
+                    }
                 }
             }
         }
@@ -1296,11 +1338,12 @@ extension BrowserViewController: URLBarDelegate {
 
         // Wait for both the bookmark status and the pinned status
         deferredBookmarkStatus.both(deferredPinnedTopSiteStatus).uponQueue(.main) {
+            let shouldShowNewTabButton = self.profile.prefs.boolForKey(PrefsKeys.ShowNewTabToolbarButton) ?? (self.newTabUserResearch?.newTabState ?? false)
             let isBookmarked = $0.successValue ?? false
             let isPinned = $1.successValue ?? false
             let pageActions = self.getTabActions(tab: tab, buttonView: button, presentShareMenu: actionMenuPresenter,
                                                  findInPage: findInPageAction, presentableVC: self, isBookmarked: isBookmarked,
-                                                 isPinned: isPinned, success: successCallback)
+                                                 isPinned: isPinned, shouldShowNewTabButton: shouldShowNewTabButton, success: successCallback)
             self.presentSheetWith(title: Strings.PageActionMenuTitle, actions: pageActions, on: self, from: button)
         }
     }
@@ -1372,6 +1415,20 @@ extension BrowserViewController: URLBarDelegate {
             print("readingList.createRecordWithURL(url: \"\(url.absoluteString)\", ...) failed with error: \(error)")
         }
         return true
+    }
+
+    func urlBarDidLongPressReload(_ urlBar: URLBarView, from button: UIButton) {
+        guard let tab = tabManager.selectedTab else {
+            return
+        }
+        let urlActions = self.getRefreshLongPressMenu(for: tab)
+        guard !urlActions.isEmpty else {
+            return
+        }
+        let generator = UIImpactFeedbackGenerator(style: .heavy)
+        generator.impactOccurred()
+        let shouldSuppress = !topTabsVisible && UIDevice.current.userInterfaceIdiom == .pad
+        presentSheetWith(actions: [urlActions], on: self, from: button, suppressPopover: shouldSuppress)
     }
 
     func locationActionsForURLBar(_ urlBar: URLBarView) -> [AccessibleAction] {
@@ -1821,8 +1878,7 @@ extension BrowserViewController: TabManagerDelegate {
         }
 
         updateFindInPageVisibility(visible: false, tab: previous)
-
-        navigationToolbar.updateReloadStatus(selected?.loading ?? false)
+        setupMiddleButtonStatus(isLoading: selected?.loading ?? false)
         navigationToolbar.updateBackStatus(selected?.canGoBack ?? false)
         navigationToolbar.updateForwardStatus(selected?.canGoForward ?? false)
         if let url = selected?.webView?.url, !InternalURL.isValid(url: url) {
@@ -1930,10 +1986,6 @@ extension BrowserViewController: UIAdaptivePresentationControllerDelegate {
 
 extension BrowserViewController {
     func presentIntroViewController(_ alwaysShow: Bool = false) {
-        if let deeplink = self.profile.prefs.stringForKey("AdjustDeeplinkKey"), let url = URL(string: deeplink) {
-            self.launchFxAFromDeeplinkURL(url)
-            return
-        }
         if alwaysShow || profile.prefs.intForKey(PrefsKeys.IntroSeen) == nil {
             onboardingUserResearchHelper(alwaysShow)
         }
@@ -2055,15 +2107,6 @@ extension BrowserViewController {
         }
     }
 
-    func launchFxAFromDeeplinkURL(_ url: URL) {
-        self.profile.prefs.removeObjectForKey("AdjustDeeplinkKey")
-        var query = url.getQuery()
-        query["entrypoint"] = "adjust_deepklink_ios"
-        let fxaParams: FxALaunchParams
-        fxaParams = FxALaunchParams(query: query)
-        self.presentSignInViewController(fxaParams)
-    }
-
     /// This function is called to determine if FxA sign in flow or settings page should be shown
     /// - Parameters:
     ///     - deepLinkParams: FxALaunchParams from deeplink query
@@ -2160,8 +2203,13 @@ extension BrowserViewController: ContextMenuHelperDelegate {
             actionSheetController.addAction(bookmarkAction, accessibilityIdentifier: "linkContextMenu.bookmarkLink")
 
             let downloadAction = UIAlertAction(title: Strings.ContextMenuDownloadLink, style: .default) { _ in
-                self.pendingDownloadWebView = currentTab.webView
-                DownloadContentScript.requestDownload(url: url, tab: currentTab)
+                // This checks if download is a blob, if yes, begin blob download process
+                if !DownloadContentScript.requestBlobDownload(url: url, tab: currentTab) {
+                    //if not a blob, set pendingDownloadWebView and load the request in the webview, which will trigger the WKWebView navigationResponse delegate function and eventually downloadHelper.open()
+                    self.pendingDownloadWebView = currentTab.webView
+                    let request = URLRequest(url: url)
+                    currentTab.webView?.load(request)
+                }
             }
             actionSheetController.addAction(downloadAction, accessibilityIdentifier: "linkContextMenu.download")
 
@@ -2181,44 +2229,10 @@ extension BrowserViewController: ContextMenuHelperDelegate {
                 dialogTitle = elements.title ?? url.absoluteString
             }
 
-            let photoAuthorizeStatus = PHPhotoLibrary.authorizationStatus()
             let saveImageAction = UIAlertAction(title: Strings.ContextMenuSaveImage, style: .default) { _ in
-                let handlePhotoLibraryAuthorized = {
-                    DispatchQueue.main.async {
-                        self.getImageData(url) { data in
-                            PHPhotoLibrary.shared().performChanges({
-                                PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
-                            })
-                        }
-                    }
-                }
-
-                let handlePhotoLibraryDenied = {
-                    DispatchQueue.main.async {
-                        let accessDenied = UIAlertController(title: Strings.PhotoLibraryFirefoxWouldLikeAccessTitle, message: Strings.PhotoLibraryFirefoxWouldLikeAccessMessage, preferredStyle: .alert)
-                        let dismissAction = UIAlertAction(title: Strings.CancelString, style: .default, handler: nil)
-                        accessDenied.addAction(dismissAction)
-                        let settingsAction = UIAlertAction(title: Strings.OpenSettingsString, style: .default ) { _ in
-                            UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!, options: [:])
-                        }
-                        accessDenied.addAction(settingsAction)
-                        self.present(accessDenied, animated: true, completion: nil)
-                    }
-                }
-
-                if photoAuthorizeStatus == .notDetermined {
-                    PHPhotoLibrary.requestAuthorization({ status in
-                        guard status == .authorized else {
-                            handlePhotoLibraryDenied()
-                            return
-                        }
-
-                        handlePhotoLibraryAuthorized()
-                    })
-                } else if photoAuthorizeStatus == .authorized {
-                    handlePhotoLibraryAuthorized()
-                } else {
-                    handlePhotoLibraryDenied()
+                self.getImageData(url) { data in
+                    guard let image = UIImage(data: data) else { return }
+                    self.writeToPhotoAlbum(image: image)
                 }
             }
             actionSheetController.addAction(saveImageAction, accessibilityIdentifier: "linkContextMenu.saveImage")
@@ -2301,6 +2315,19 @@ extension BrowserViewController: ContextMenuHelperDelegate {
         displayedPopoverController?.dismiss(animated: true) {
             self.displayedPopoverController = nil
         }
+    }
+    
+    //Support for CMD+ Click on link to open in a new tab
+     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+         super.pressesBegan(presses, with: event)
+         guard let key = presses.first?.key, (key.keyCode == .keyboardLeftGUI || key.keyCode == .keyboardRightGUI) else { return } //GUI buttons = CMD buttons on ipad/mac
+         self.isCmdClickForNewTab = true
+    }
+    
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        super.pressesEnded(presses, with: event)
+        guard let key = presses.first?.key, (key.keyCode == .keyboardLeftGUI || key.keyCode == .keyboardRightGUI) else { return }
+        self.isCmdClickForNewTab = false
     }
 }
 

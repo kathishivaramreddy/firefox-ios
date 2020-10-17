@@ -4,6 +4,15 @@
 
 import UIKit
 
+public enum AppName: String, CustomStringConvertible {
+    case shortName = "Firefox"
+    case longName = "Firefox Daylight"
+
+    public var description: String {
+        return self.rawValue
+    }
+}
+
 public enum AppBuildChannel: String {
     case release = "release"
     case beta = "beta"
@@ -28,6 +37,8 @@ public struct KeychainKey {
 public struct AppConstants {
     public static let IsRunningTest = NSClassFromString("XCTestCase") != nil || ProcessInfo.processInfo.arguments.contains(LaunchArguments.Test)
 
+    public static let IsRunningPerfTest = NSClassFromString("XCTestCase") != nil || ProcessInfo.processInfo.arguments.contains(LaunchArguments.PerformanceTest)
+    
     public static let FxAiOSClientId = "1b1a3e44c54fbb58"
 
     /// Build Channel.
@@ -103,19 +114,6 @@ public struct AppConstants {
             return false
         #endif
     }()
-
-    ///  Toggle use of Document Services — initially language detection.
-    public static let MOZ_DOCUMENT_SERVICES: Bool = {
-        #if MOZ_CHANNEL_RELEASE
-        return false
-        #elseif MOZ_CHANNEL_BETA
-        return true
-        #elseif MOZ_CHANNEL_FENNEC
-        return true
-        #else
-        return true
-        #endif
-    }()
     
     /// Put it behind a feature flag as the strings didn't land in time
     public static let MOZ_SHAKE_TO_RESTORE: Bool = {
@@ -129,5 +127,4 @@ public struct AppConstants {
         return true
         #endif
     }()
-
 }

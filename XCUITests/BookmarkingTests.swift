@@ -37,6 +37,15 @@ class BookmarkingTests: BaseTestCase {
         }
     }
 
+    private func undoBookmarkRemoval() {
+        navigator.goto(PageOptionsMenu)
+        waitForExistence(app.tables.cells["Remove Bookmark"])
+        app.cells["Remove Bookmark"].tap()
+        navigator.nowAt(BrowserTab)
+        waitForExistence(app.buttons["Undo"], timeout: 3)
+        app.buttons["Undo"].tap()
+    }
+
     private func checkUnbookmarked() {
         navigator.goto(PageOptionsMenu)
         waitForExistence(app.tables.cells["Bookmark This Page"])
@@ -136,9 +145,6 @@ class BookmarkingTests: BaseTestCase {
         waitForValueContains(app.textFields["url"], value: url_3)
     }
 
-    // Smoketest
-    // Disabling and modifying this check xcode 11.3 update Issue 5937
-    /*
     func testBookmarksAwesomeBar() {
         navigator.nowAt(BrowserTab)
         navigator.goto(URLBarOpen)
@@ -175,7 +181,7 @@ class BookmarkingTests: BaseTestCase {
         waitForExistence(app.tables["SiteTable"])
         waitForExistence(app.buttons["olx.ro"])
         XCTAssertNotEqual(app.tables["SiteTable"].cells.count, 0)
-    }*/
+    }
 
     func testAddBookmark() {
         addNewBookmark()
@@ -233,6 +239,16 @@ class BookmarkingTests: BaseTestCase {
         waitForExistence(app.tables["Context Menu"])
         app.tables["Context Menu"].cells["action_bookmark_remove"].tap()
         checkItemsInBookmarksList(items: 0)
+    }
+
+    func testUndoDeleteBookmark() {
+        navigator.openURL(path(forTestPage: url_1))
+        navigator.nowAt(BrowserTab)
+        waitForTabsButton()
+        bookmark()
+        checkBookmarked()
+        undoBookmarkRemoval()
+        checkBookmarked()
     }
 
     private func addNewBookmark() {

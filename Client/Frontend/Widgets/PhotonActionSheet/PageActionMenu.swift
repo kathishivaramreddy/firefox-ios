@@ -37,6 +37,7 @@ extension PhotonActionSheetProtocol {
                        presentableVC: PresentableVC,
                        isBookmarked: Bool,
                        isPinned: Bool,
+                       shouldShowNewTabButton: Bool,
                        success: @escaping (String, ButtonToastAction) -> Void) -> Array<[PhotonActionSheetItem]> {
         if tab.url?.isFileURL ?? false {
             let shareFile = PhotonActionSheetItem(title: Strings.AppMenuSharePageTitleString, iconString: "action_share") { _, _ in
@@ -167,7 +168,31 @@ extension PhotonActionSheetProtocol {
                 success(Strings.AppMenuCopyURLConfirmMessage, .copyUrl)
             }
         }
-
+        
+        let refreshPage = PhotonActionSheetItem(title: Strings.ReloadPageTitle, iconString: "nav-refresh") { _, _ in
+            self.tabManager.selectedTab?.reload()
+        }
+        
+        let stopRefreshPage = PhotonActionSheetItem(title: Strings.StopReloadPageTitle, iconString: "nav-stop") { _, _ in
+            self.tabManager.selectedTab?.stop()
+        }
+        
+        let refreshAction = tab.loading ? stopRefreshPage : refreshPage
+        var refreshActions = [refreshAction]
+        
+        if let url = tab.webView?.url, let helper = tab.contentBlocker, helper.isEnabled, helper.blockingStrengthPref == .strict {
+            let isSafelisted = helper.status == .safelisted
+            
+            let title = !isSafelisted ? Strings.TrackingProtectionReloadWithout : Strings.TrackingProtectionReloadWith
+            let imageName = helper.isEnabled ? "menu-TrackingProtection-Off" : "menu-TrackingProtection"
+            let toggleTP = PhotonActionSheetItem(title: title, iconString: imageName) { _, _ in
+                ContentBlocker.shared.safelist(enable: !isSafelisted, url: url) {
+                    tab.reload()
+                }
+            }
+            refreshActions.append(toggleTP)
+        }
+        
         var mainActions = [sharePage]
 
         // Disable bookmarking and reading list if the URL is too long.
@@ -192,7 +217,11 @@ extension PhotonActionSheetProtocol {
             commonActions.insert(findInPageAction, at: 0)
         }
 
-        return [mainActions, commonActions]
+        if shouldShowNewTabButton && tab.readerModeAvailableOrActive {
+            return [refreshActions, mainActions, commonActions]
+        } else {
+            return [mainActions, commonActions]
+        }
     }
 
 }
